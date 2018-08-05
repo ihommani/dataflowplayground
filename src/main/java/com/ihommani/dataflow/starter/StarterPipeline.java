@@ -1,13 +1,20 @@
 package com.ihommani.dataflow.starter;
 
+import com.google.common.collect.Lists;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SimpleFunction;
+import org.apache.beam.sdk.values.PCollection;
+
+import java.util.List;
+import java.util.Map;
 
 /**
  * A starter example for writing Beam programs.
@@ -28,16 +35,30 @@ import org.apache.beam.sdk.transforms.SimpleFunction;
 @Slf4j
 public class StarterPipeline {
     public static void main(String[] args) {
-        Pipeline p = Pipeline.create(
-                PipelineOptionsFactory.fromArgs(args).withValidation().create());
 
-        p.apply(Create.of("Hello", "World"))
+        // from here we get the information from the command line argument
+        // By default we return PipelineOptions entity. But we can return our own entity derived from PipelineOtions interfaces --> 'as(...)' method
+        // In particular we define the pipeline runner through the options. If none is set, we use the DirectRunner (used to run pipeline locally)
+        PipelineOptions options = PipelineOptionsFactory
+                .fromArgs(args)
+                .withValidation()
+                .create();
+
+        Pipeline p = Pipeline.create(options);
+
+        PCollection<String> upperCaseWords = p.apply(Create.of("Hello", "World"))
                 .apply(MapElements.via(new SimpleFunction<String, String>() {
                     @Override
                     public String apply(String input) {
                         return input.toUpperCase();
                     }
-                }))
+                }));
+
+        List<String> expectedResults = Lists.newArrayList("HELLO", "WORLD");
+        PAssert.that(upperCaseWords).containsInAnyOrder(expectedResults);
+
+
+        upperCaseWords
                 .apply(ParDo.of(new DoFn<String, Void>() {
                     @ProcessElement
                     public void processElement(ProcessContext c) {

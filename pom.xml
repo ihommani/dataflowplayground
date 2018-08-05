@@ -36,6 +36,9 @@
             <artifactId>lombok</artifactId>
             <version>1.16.18</version>
         </dependency>
+
+        <!-- Testing dependency -->
+
     </dependencies>
 
     <build>
