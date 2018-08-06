@@ -2,6 +2,7 @@ package com.ihommani.dataflow.starter;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
@@ -25,6 +26,7 @@ import org.apache.beam.sdk.values.PCollection;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 
+import java.io.IOException;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -188,7 +190,7 @@ public class StarterPipeline {
         }
     }
 
-    static void runStarterPipeline(StarterPipelineOptions options) {
+    static void runStarterPipeline(StarterPipelineOptions options) throws IOException {
         Pipeline p = Pipeline.create(options);
 
         final Instant minTimestamp = new Instant(options.getMinTimestampMillis());
@@ -207,10 +209,15 @@ public class StarterPipeline {
                 .apply(MapElements.via(new FormatAsTextFn()))
                 .apply("WriteCounts", TextIO.write().to(options.getOutput()).withSuffix(".txt"));
 
-        p.run().waitUntilFinish();
+        PipelineResult result = p.run();
+        try {
+            result.waitUntilFinish();
+        } catch (Exception exc) {
+            result.cancel();
+        }
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws IOException {
 
         // from here we get the information from the command line argument
         // By default we return PipelineOptions entity. But we can return our own entity derived from PipelineOtions interfaces --> 'as(...)' method
