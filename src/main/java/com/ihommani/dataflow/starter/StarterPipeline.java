@@ -1,5 +1,6 @@
 package com.ihommani.dataflow.starter;
 
+import com.ihommani.dataflow.common.WriteOneFilePerWindow;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
@@ -103,6 +104,12 @@ public class StarterPipeline {
         Long getMaxTimestampMillis();
 
         void setMaxTimestampMillis(Long value);
+
+        @Description("Duration in minutes of a fixe sized window")
+        @Default.Long(5)
+        Long getWindowDuration();
+
+        void setWindowDuration(Long value);
     }
 
     /**
@@ -197,17 +204,18 @@ public class StarterPipeline {
         final Instant maxTimestamp = new Instant(options.getMaxTimestampMillis());
 
         PCollection<String> pipeline = p.apply("ReadLines", TextIO.read().from(options.getInputFile()))
+                //TextIO assigns the same to each element. Using this PTransfom allow to mock event time. TODO: try WithTimestamps
                 .apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
 
         PCollection<String> windowedPipeline = pipeline
-                .apply(Window.into(FixedWindows.of(Duration.standardMinutes(2L))));
+                .apply("windowing pipeline with Fix window", Window.into(FixedWindows.of(Duration.standardMinutes(options.getWindowDuration()))));
 
         PCollection<KV<String, Long>> wordCount = windowedPipeline
                 .apply("counting word", new CountWords());
 
         wordCount
-                .apply(MapElements.via(new FormatAsTextFn()))
-                .apply("WriteCounts", TextIO.write().to(options.getOutput()).withSuffix(".txt"));
+                .apply("Stringify key value pair", MapElements.via(new FormatAsTextFn()))
+                .apply("writing one file per window", new WriteOneFilePerWindow(options.getOutput(), 1));
 
         PipelineResult result = p.run();
         try {
