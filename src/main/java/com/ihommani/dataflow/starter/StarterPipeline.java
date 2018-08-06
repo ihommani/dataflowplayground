@@ -1,6 +1,5 @@
 package com.ihommani.dataflow.starter;
 
-import com.google.common.collect.Lists;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.TextIO;
@@ -8,11 +7,11 @@ import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.options.Default;
+import org.apache.beam.sdk.options.DefaultValueFactory;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation;
-import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
@@ -24,8 +23,9 @@ import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.joda.time.Duration;
+import org.joda.time.Instant;
 
-import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * A starter example for writing Beam programs.
@@ -45,6 +45,29 @@ import java.util.List;
  */
 @Slf4j
 public class StarterPipeline {
+
+
+    /**
+     * A {@link DefaultValueFactory} that returns the current system time.
+     */
+    public static class DefaultToCurrentSystemTime implements DefaultValueFactory<Long> {
+        @Override
+        public Long create(PipelineOptions options) {
+            return System.currentTimeMillis();
+        }
+    }
+
+    /**
+     * A {@link DefaultValueFactory} that returns the minimum timestamp plus one hour.
+     */
+    public static class DefaultToMinTimestampPlusOneHour implements DefaultValueFactory<Long> {
+        @Override
+        public Long create(PipelineOptions options) {
+            return options.as(StarterPipelineOptions.class).getMinTimestampMillis()
+                    + Duration.standardHours(1).getMillis();
+        }
+    }
+
 
     public interface StarterPipelineOptions extends PipelineOptions {
 
@@ -66,6 +89,18 @@ public class StarterPipeline {
         String getOutput();
 
         void setOutput(String value);
+
+        @Description("Minimum randomly assigned timestamp, in milliseconds-since-epoch")
+        @Default.InstanceFactory(DefaultToCurrentSystemTime.class)
+        Long getMinTimestampMillis();
+
+        void setMinTimestampMillis(Long value);
+
+        @Description("Maximum randomly assigned timestamp, in milliseconds-since-epoch")
+        @Default.InstanceFactory(DefaultToMinTimestampPlusOneHour.class)
+        Long getMaxTimestampMillis();
+
+        void setMaxTimestampMillis(Long value);
     }
 
     /**
@@ -94,6 +129,29 @@ public class StarterPipeline {
                     receiver.output(word);
                 }
             }
+        }
+    }
+
+    static class AddTimestampFn extends DoFn<String, String> {
+        private final Instant minTimestamp;
+        private final Instant maxTimestamp;
+
+        AddTimestampFn(Instant minTimestamp, Instant maxTimestamp) {
+            this.minTimestamp = minTimestamp;
+            this.maxTimestamp = maxTimestamp;
+        }
+
+        @ProcessElement
+        public void processElement(@Element String element, OutputReceiver<String> receiver) {
+            Instant randomTimestamp =
+                    new Instant(
+                            ThreadLocalRandom.current()
+                                    .nextLong(minTimestamp.getMillis(), maxTimestamp.getMillis()));
+
+            /*
+             * Concept #2: Set the data element with that timestamp.
+             */
+            receiver.outputWithTimestamp(element, new Instant(randomTimestamp));
         }
     }
 
@@ -133,10 +191,21 @@ public class StarterPipeline {
     static void runStarterPipeline(StarterPipelineOptions options) {
         Pipeline p = Pipeline.create(options);
 
-        p.apply("ReadLines", TextIO.read().from(options.getInputFile()))
-                .apply(new CountWords())
+        final Instant minTimestamp = new Instant(options.getMinTimestampMillis());
+        final Instant maxTimestamp = new Instant(options.getMaxTimestampMillis());
+
+        PCollection<String> pipeline = p.apply("ReadLines", TextIO.read().from(options.getInputFile()))
+                .apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
+
+        PCollection<String> windowedPipeline = pipeline
+                .apply(Window.into(FixedWindows.of(Duration.standardMinutes(2L))));
+
+        PCollection<KV<String, Long>> wordCount = windowedPipeline
+                .apply("counting word", new CountWords());
+
+        wordCount
                 .apply(MapElements.via(new FormatAsTextFn()))
-                .apply("WriteCounts", TextIO.write().to(options.getOutput()));
+                .apply("WriteCounts", TextIO.write().to(options.getOutput()).withSuffix(".txt"));
 
         p.run().waitUntilFinish();
     }
