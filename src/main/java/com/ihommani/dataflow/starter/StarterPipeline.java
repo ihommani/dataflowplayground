@@ -25,8 +25,8 @@ import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.windowing.AfterAll;
 import org.apache.beam.sdk.transforms.windowing.AfterPane;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
-import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
+import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -236,17 +236,20 @@ public class StarterPipeline {
         //.apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
 
         PCollection<PubsubMessage> windowedPipeline = pipeline
-                .apply("windowing pipeline with Fix window", Window.<PubsubMessage>into(FixedWindows.of(Duration.standardMinutes(2)))
-                        .triggering(Repeatedly.forever(AfterAll.of(AfterPane.elementCountAtLeast(3), AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(15)))))
+                .apply("windowing pipeline with Fix window", Window.<PubsubMessage>into(Sessions.withGapDuration(Duration.standardSeconds(10)))
+                        .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(3))))
                         .withAllowedLateness(Duration.standardSeconds(3))
                         .discardingFiredPanes());
 
         PCollection<KV<String, Long>> wordCount = windowedPipeline
                 .apply("counting word", new CountWords());
 
+        DoFn<String, PubsubMessage> fn = new DoFn<String, PubsubMessage>() {
+        };
         wordCount
                 .apply("Stringify key value pair", MapElements.via(new FormatAsTextFn()))
-                .apply("writing one file per window", new WriteOneFilePerWindow(options.getOutput(), 1));
+                .apply("creating pubsub message", ParDo.of(fn))
+                .apply("writing one file per window", PubsubIO.writeMessages());
 
         PipelineResult result = p.run();
         try {
