@@ -20,7 +20,7 @@ import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SimpleFunction;
-import org.apache.beam.sdk.transforms.windowing.FixedWindows;
+import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -208,14 +208,12 @@ public class StarterPipeline {
                 .apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
 
         PCollection<String> windowedPipeline = pipeline
-                .apply("windowing pipeline with Fix window", Window.into(FixedWindows.of(Duration.standardMinutes(options.getWindowDuration()))));
+                .apply("windowing pipeline with Fix window", Window.into(Sessions.withGapDuration(Duration.standardMinutes(options.getWindowDuration()))));
 
-        PCollection<KV<String, Long>> wordCount = windowedPipeline
-                .apply("counting word", new CountWords());
-
-        wordCount
+        windowedPipeline
+                .apply("counting word", new CountWords())
                 .apply("Stringify key value pair", MapElements.via(new FormatAsTextFn()))
-                .apply("writing one file per window", new WriteOneFilePerWindow(options.getOutput(), 1));
+                .apply("writing one file per window", TextIO.write().withoutSharding().to(options.getOutput()));
 
         PipelineResult result = p.run();
         try {
