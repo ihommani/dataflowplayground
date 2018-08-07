@@ -1,10 +1,11 @@
 package com.ihommani.dataflow.starter;
 
-import com.ihommani.dataflow.common.WriteOneFilePerWindow;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.io.TextIO;
+import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
+import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
+import org.apache.beam.sdk.io.gcp.pubsub.PubsubOptions;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -20,6 +21,11 @@ import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SimpleFunction;
+import org.apache.beam.sdk.transforms.windowing.AfterFirst;
+import org.apache.beam.sdk.transforms.windowing.AfterPane;
+import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
+import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
+import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
@@ -28,7 +34,7 @@ import org.joda.time.Duration;
 import org.joda.time.Instant;
 
 import java.io.IOException;
-import java.util.concurrent.ThreadLocalRandom;
+import java.nio.charset.StandardCharsets;
 
 /**
  * A starter example for writing Beam programs.
@@ -72,7 +78,7 @@ public class StarterPipeline {
     }
 
 
-    public interface StarterPipelineOptions extends PipelineOptions {
+    public interface StarterPipelineOptions extends PubsubOptions {
 
         /**
          * By default, this example reads from a public dataset containing the text of King Lear. Set
@@ -106,7 +112,7 @@ public class StarterPipeline {
         void setMaxTimestampMillis(Long value);
 
         @Description("Duration in minutes of a fixe sized window")
-        @Default.Long(5)
+        @Default.Long(1)
         Long getWindowDuration();
 
         void setWindowDuration(Long value);
@@ -141,26 +147,14 @@ public class StarterPipeline {
         }
     }
 
-    static class AddTimestampFn extends DoFn<String, String> {
-        private final Instant minTimestamp;
-        private final Instant maxTimestamp;
-
-        AddTimestampFn(Instant minTimestamp, Instant maxTimestamp) {
-            this.minTimestamp = minTimestamp;
-            this.maxTimestamp = maxTimestamp;
-        }
+    static class AddTimestampFn extends DoFn<PubsubMessage, PubsubMessage> {
 
         @ProcessElement
-        public void processElement(@Element String element, OutputReceiver<String> receiver) {
-            Instant randomTimestamp =
-                    new Instant(
-                            ThreadLocalRandom.current()
-                                    .nextLong(minTimestamp.getMillis(), maxTimestamp.getMillis()));
-
+        public void processElement(@Element PubsubMessage element, OutputReceiver<PubsubMessage> receiver) {
             /*
-             * Concept #2: Set the data element with that timestamp.
+             * Concept #2: Set the data element with that timestamp corresponding to the instant where the "system" process it
              */
-            receiver.outputWithTimestamp(element, new Instant(randomTimestamp));
+            receiver.outputWithTimestamp(element, Instant.now());
         }
     }
 
@@ -197,23 +191,57 @@ public class StarterPipeline {
         }
     }
 
+    public static class ExtractPayload extends SimpleFunction<PubsubMessage, String> {
+        @Override
+        public String apply(PubsubMessage input) {
+            return new String(input.getPayload(), StandardCharsets.UTF_8);
+        }
+    }
+
+    public static class FormatAsPubSubMessage extends SimpleFunction<String, PubsubMessage> {
+        @Override
+        public PubsubMessage apply(String message) {
+            return new PubsubMessage(message.getBytes(), null);
+        }
+    }
+
     static void runStarterPipeline(StarterPipelineOptions options) throws IOException {
         Pipeline p = Pipeline.create(options);
 
-        final Instant minTimestamp = new Instant(options.getMinTimestampMillis());
-        final Instant maxTimestamp = new Instant(options.getMaxTimestampMillis());
+        PCollection<PubsubMessage> pipeline = p.apply("ReadLines", PubsubIO.readMessages().fromSubscription("projects/project-id/subscriptions/bar"))
+                //TextIO assigns the same to each element. Using this PTransfom allow to mock event time. TODO: try WithTimetamps
+                .apply("dummy timestamp", ParDo.of(new AddTimestampFn())); //TODO: needed?
 
-        PCollection<String> pipeline = p.apply("ReadLines", TextIO.read().from(options.getInputFile()))
-                //TextIO assigns the same to each element. Using this PTransfom allow to mock event time. TODO: try WithTimestamps
-                .apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
 
-        PCollection<String> windowedPipeline = pipeline
-                .apply("windowing pipeline with Fix window", Window.into(Sessions.withGapDuration(Duration.standardMinutes(options.getWindowDuration()))));
+        PCollection<PubsubMessage> killingPipeline = pipeline
+                .apply("monitoring pipeline kill", Window.<PubsubMessage>into(
+                        Sessions.withGapDuration(Duration.standardMinutes(options.getWindowDuration())))
+                        .triggering(AfterWatermark.pastEndOfWindow())
+                        .withAllowedLateness(Duration.standardSeconds(3))
+                        .discardingFiredPanes()
+                );
 
-        windowedPipeline
+        killingPipeline.apply("commiting suicide", PubsubIO.writeMessages().to("projects/project-id/topics/kill"));
+
+
+        PCollection<PubsubMessage> windowedPipeline = pipeline
+                .apply("windowing pipeline with Fix window", Window.<PubsubMessage>into(
+                        Sessions.withGapDuration(Duration.standardMinutes(options.getWindowDuration())))
+                        .triggering(Repeatedly.forever(
+                                AfterFirst.of(
+                                        //AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardMinutes(1)),
+                                        AfterPane.elementCountAtLeast(3))
+                        )
+                                .orFinally(AfterWatermark.pastEndOfWindow()))
+                        .withAllowedLateness(Duration.standardSeconds(3))
+                        .discardingFiredPanes()
+                );
+
+        windowedPipeline.apply(MapElements.via(new ExtractPayload()))
                 .apply("counting word", new CountWords())
                 .apply("Stringify key value pair", MapElements.via(new FormatAsTextFn()))
-                .apply("writing one file per window", TextIO.write().withoutSharding().to(options.getOutput()));
+                .apply("transforming the payload into PubSubMessage", MapElements.via(new FormatAsPubSubMessage()))
+                .apply("writing one file per window", PubsubIO.writeMessages().to("projects/project-id/topics/fooexit"));
 
         PipelineResult result = p.run();
         try {
@@ -232,6 +260,9 @@ public class StarterPipeline {
                 .fromArgs(args)
                 .withValidation()
                 .as(StarterPipelineOptions.class);
+
+        options.setStreaming(true);
+        options.setPubsubRootUrl("http://localhost:8085");
 
         runStarterPipeline(options);
     }
