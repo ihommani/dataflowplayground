@@ -225,6 +225,13 @@ public class StarterPipeline {
         }
     }
 
+    public static class FormatAsPubSubMessage extends SimpleFunction<String, PubsubMessage> {
+        @Override
+        public PubsubMessage apply(String message) {
+            return new PubsubMessage("@@@@@".getBytes(), null);
+        }
+    }
+
     static void runStarterPipeline(StarterPipelineOptions options) throws IOException {
         Pipeline p = Pipeline.create(options);
 
@@ -248,8 +255,8 @@ public class StarterPipeline {
         };
         wordCount
                 .apply("Stringify key value pair", MapElements.via(new FormatAsTextFn()))
-                .apply("creating pubsub message", ParDo.of(fn))
-                .apply("writing one file per window", PubsubIO.writeMessages());
+                .apply("creating pubsub message", MapElements.via(new FormatAsPubSubMessage()))
+                .apply("writing one file per window", PubsubIO.writeMessages().to("projects/project-id/topics/sink"));
 
         PipelineResult result = p.run();
         try {
