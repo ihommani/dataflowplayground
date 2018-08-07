@@ -4,7 +4,9 @@ import com.ihommani.dataflow.common.WriteOneFilePerWindow;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.io.TextIO;
+import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
+import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
+import org.apache.beam.sdk.io.gcp.pubsub.PubsubOptions;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -20,7 +22,11 @@ import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SimpleFunction;
+import org.apache.beam.sdk.transforms.windowing.AfterAll;
+import org.apache.beam.sdk.transforms.windowing.AfterPane;
+import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
+import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -72,7 +78,7 @@ public class StarterPipeline {
     }
 
 
-    public interface StarterPipelineOptions extends PipelineOptions {
+    public interface StarterPipelineOptions extends PubsubOptions {
 
         /**
          * By default, this example reads from a public dataset containing the text of King Lear. Set
@@ -141,6 +147,32 @@ public class StarterPipeline {
         }
     }
 
+    static class ExtractWordsMessage extends DoFn<PubsubMessage, String> {
+        private final Counter emptyLines = Metrics.counter(ExtractWordsFn.class, "emptyLines");
+        private final Distribution lineLenDist =
+                Metrics.distribution(ExtractWordsFn.class, "lineLenDistro");
+
+        @ProcessElement
+        public void processElement(@Element PubsubMessage pubsubMessage, OutputReceiver<String> receiver, ProcessContext c) {
+            String element = new String(pubsubMessage.getPayload());
+
+            lineLenDist.update(element.length());
+            if (element.trim().isEmpty()) {
+                emptyLines.inc();
+            }
+            System.out.println(c.timestamp());
+            // Split the line into words.
+            String[] words = element.split("[^\\p{L}]+", -1);
+
+            // Output each word encountered into the output PCollection.
+            for (String word : words) {
+                if (!word.isEmpty()) {
+                    receiver.output(word);
+                }
+            }
+        }
+    }
+
     static class AddTimestampFn extends DoFn<String, String> {
         private final Instant minTimestamp;
         private final Instant maxTimestamp;
@@ -173,17 +205,13 @@ public class StarterPipeline {
      * modular testing, and an improved monitoring experience.
      */
     public static class CountWords
-            extends PTransform<PCollection<String>, PCollection<KV<String, Long>>> {
+            extends PTransform<PCollection<PubsubMessage>, PCollection<KV<String, Long>>> {
         @Override
-        public PCollection<KV<String, Long>> expand(PCollection<String> lines) {
-
-            // Convert lines of text into individual words.
-            PCollection<String> words = lines.apply(ParDo.of(new ExtractWordsFn()));
-
+        public PCollection<KV<String, Long>> expand(PCollection<PubsubMessage> messages) {
+            PCollection<String> words = messages.apply(ParDo.of(new ExtractWordsMessage()));
+            System.out.println("@@@@@@");
             // Count the number of times each word occurs.
-            PCollection<KV<String, Long>> wordCounts = words.apply(Count.perElement());
-
-            return wordCounts;
+            return words.apply(Count.perElement());
         }
     }
 
@@ -203,12 +231,15 @@ public class StarterPipeline {
         final Instant minTimestamp = new Instant(options.getMinTimestampMillis());
         final Instant maxTimestamp = new Instant(options.getMaxTimestampMillis());
 
-        PCollection<String> pipeline = p.apply("ReadLines", TextIO.read().from(options.getInputFile()))
-                //TextIO assigns the same to each element. Using this PTransfom allow to mock event time. TODO: try WithTimestamps
-                .apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
+        PCollection<PubsubMessage> pipeline = p.apply("ReadLines", PubsubIO.readMessages().fromSubscription("projects/project-id/subscriptions/bar"));
+        //TextIO assigns the same to each element. Using this PTransfom allow to mock event time. TODO: try WithTimestamps
+        //.apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
 
-        PCollection<String> windowedPipeline = pipeline
-                .apply("windowing pipeline with Fix window", Window.into(FixedWindows.of(Duration.standardMinutes(options.getWindowDuration()))));
+        PCollection<PubsubMessage> windowedPipeline = pipeline
+                .apply("windowing pipeline with Fix window", Window.<PubsubMessage>into(FixedWindows.of(Duration.standardMinutes(2)))
+                        .triggering(Repeatedly.forever(AfterAll.of(AfterPane.elementCountAtLeast(3), AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(15)))))
+                        .withAllowedLateness(Duration.standardSeconds(3))
+                        .discardingFiredPanes());
 
         PCollection<KV<String, Long>> wordCount = windowedPipeline
                 .apply("counting word", new CountWords());
@@ -234,6 +265,9 @@ public class StarterPipeline {
                 .fromArgs(args)
                 .withValidation()
                 .as(StarterPipelineOptions.class);
+
+        options.setStreaming(true);
+        options.setPubsubRootUrl("http://localhost:8085");
 
         runStarterPipeline(options);
     }
