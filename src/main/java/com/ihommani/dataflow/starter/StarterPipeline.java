@@ -21,11 +21,7 @@ import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SimpleFunction;
-import org.apache.beam.sdk.transforms.windowing.AfterFirst;
-import org.apache.beam.sdk.transforms.windowing.AfterPane;
-import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
-import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
-import org.apache.beam.sdk.transforms.windowing.Repeatedly;
+import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
@@ -181,6 +177,24 @@ public class StarterPipeline {
         }
     }
 
+    public static class GroupMessage
+            extends PTransform<PCollection<PubsubMessage>, PCollection<KV<String, Long>>> {
+        @Override
+        public PCollection<KV<String, Long>> expand(PCollection<PubsubMessage> messages) {
+
+            PCollection<String> words = messages.apply(ParDo.of(new DoFn<PubsubMessage, String>() {
+                @ProcessElement
+                public void processElement(@Element PubsubMessage element, OutputReceiver<String> receiver) {
+                    receiver.output(new String(element.getPayload()));
+                }
+            }));
+
+            // Count the number of times each word occurs.
+
+            return words.apply(Count.perElement());
+        }
+    }
+
     /**
      * A SimpleFunction that converts a Word and Count into a printable string.
      */
@@ -201,44 +215,39 @@ public class StarterPipeline {
     public static class FormatAsPubSubMessage extends SimpleFunction<String, PubsubMessage> {
         @Override
         public PubsubMessage apply(String message) {
-            return new PubsubMessage(message.getBytes(), null);
+            String toot = null;
+            toot.trim();
+            return new PubsubMessage(null, null);
         }
     }
 
     static void runStarterPipeline(StarterPipelineOptions options) throws IOException {
         Pipeline p = Pipeline.create(options);
 
-        PCollection<PubsubMessage> pipeline = p.apply("ReadLines", PubsubIO.readMessages().fromSubscription("projects/project-id/subscriptions/bar"))
-                //TextIO assigns the same to each element. Using this PTransfom allow to mock event time. TODO: try WithTimetamps
-                .apply("dummy timestamp", ParDo.of(new AddTimestampFn())); //TODO: needed?
+        PCollection<PubsubMessage> pipeline = p.apply("ReadLines", PubsubIO.readMessages().fromSubscription("projects/project-id/subscriptions/bar"));
+        //TextIO assigns the same to each element. Using this PTransfom allow to mock event time. TODO: try WithTimetamps
+        // .apply("dummy timestamp", ParDo.of(new AddTimestampFn())); //TODO: needed?
 
 
         PCollection<PubsubMessage> killingPipeline = pipeline
                 .apply("monitoring pipeline kill", Window.<PubsubMessage>into(
-                        Sessions.withGapDuration(Duration.standardMinutes(options.getWindowDuration())))
-                        .triggering(AfterWatermark.pastEndOfWindow())
-                        .withAllowedLateness(Duration.standardSeconds(3))
-                        .discardingFiredPanes()
+                        FixedWindows.of(Duration.standardMinutes(options.getWindowDuration())))
+                        //.triggering(AfterWatermark.pastEndOfWindow())
+                        //.withAllowedLateness(Duration.standardSeconds(3))
+                        //.discardingFiredPanes()
                 );
 
-        killingPipeline.apply("commiting suicide", PubsubIO.writeMessages().to("projects/project-id/topics/kill"));
-
+        //killingPipeline.apply("commiting suicide", PubsubIO.writeMessages().to("projects/project-id/topics/kill"));
 
         PCollection<PubsubMessage> windowedPipeline = pipeline
                 .apply("windowing pipeline with Fix window", Window.<PubsubMessage>into(
-                        Sessions.withGapDuration(Duration.standardMinutes(options.getWindowDuration())))
-                        .triggering(Repeatedly.forever(
-                                AfterFirst.of(
-                                        //AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardMinutes(1)),
-                                        AfterPane.elementCountAtLeast(3))
-                        )
-                                .orFinally(AfterWatermark.pastEndOfWindow()))
-                        .withAllowedLateness(Duration.standardSeconds(3))
-                        .discardingFiredPanes()
+                        Sessions.withGapDuration(Duration.standardHours(options.getWindowDuration())))
+                        //.triggering(AfterPane.elementCountAtLeast(30))
+                        //.withAllowedLateness(Duration.standardSeconds(3))
+                        //.discardingFiredPanes()
                 );
 
-        windowedPipeline.apply(MapElements.via(new ExtractPayload()))
-                .apply("counting word", new CountWords())
+        windowedPipeline.apply("counting word", new GroupMessage())
                 .apply("Stringify key value pair", MapElements.via(new FormatAsTextFn()))
                 .apply("transforming the payload into PubSubMessage", MapElements.via(new FormatAsPubSubMessage()))
                 .apply("writing one file per window", PubsubIO.writeMessages().to("projects/project-id/topics/fooexit"));
