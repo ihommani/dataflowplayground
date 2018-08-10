@@ -1,6 +1,5 @@
 package com.ihommani.dataflow.starter;
 
-import com.ihommani.dataflow.common.WriteOneFilePerWindow;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
@@ -22,9 +21,8 @@ import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SimpleFunction;
-import org.apache.beam.sdk.transforms.windowing.AfterAll;
-import org.apache.beam.sdk.transforms.windowing.AfterPane;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
+import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.Window;
@@ -232,6 +230,13 @@ public class StarterPipeline {
         }
     }
 
+    public static class SuicidePubSubMessage extends SimpleFunction<PubsubMessage, PubsubMessage> {
+        @Override
+        public PubsubMessage apply(PubsubMessage message) {
+            return new PubsubMessage("killing me sofly".getBytes(), null);
+        }
+    }
+
     static void runStarterPipeline(StarterPipelineOptions options) throws IOException {
         Pipeline p = Pipeline.create(options);
 
@@ -243,16 +248,26 @@ public class StarterPipeline {
         //.apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
 
         PCollection<PubsubMessage> windowedPipeline = pipeline
-                .apply("windowing pipeline with Fix window", Window.<PubsubMessage>into(Sessions.withGapDuration(Duration.standardSeconds(10)))
-                        .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(3))))
+                .apply("windowing pipeline with sessions window", Window.<PubsubMessage>into(Sessions.withGapDuration(Duration.standardSeconds(10)))
+                        .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(3))).orFinally(AfterWatermark.pastEndOfWindow()))
                         .withAllowedLateness(Duration.standardSeconds(3))
                         .discardingFiredPanes());
+
+        pipeline
+                .apply("windowing pipeline with session window2", Window.<PubsubMessage>into(Sessions.withGapDuration(Duration.standardSeconds(10)))
+                        .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(3))).orFinally(AfterWatermark.pastEndOfWindow()))
+                        .withAllowedLateness(Duration.standardSeconds(3))
+                        .discardingFiredPanes())
+                .apply(new CountWords())
+                .apply(MapElements.via(new FormatAsTextFn()))
+                .apply(MapElements.via(new FormatAsPubSubMessage()))
+                .apply(MapElements.via(new SuicidePubSubMessage()))
+                .apply(PubsubIO.writeMessages().to("projects/project-id/topics/kill"));
+
 
         PCollection<KV<String, Long>> wordCount = windowedPipeline
                 .apply("counting word", new CountWords());
 
-        DoFn<String, PubsubMessage> fn = new DoFn<String, PubsubMessage>() {
-        };
         wordCount
                 .apply("Stringify key value pair", MapElements.via(new FormatAsTextFn()))
                 .apply("creating pubsub message", MapElements.via(new FormatAsPubSubMessage()))
