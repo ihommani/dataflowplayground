@@ -1,8 +1,9 @@
-package com.ihommani.dataflow.starter;
+package dataflow.starter;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
+import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubOptions;
@@ -15,16 +16,22 @@ import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation;
+import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SimpleFunction;
+import org.apache.beam.sdk.transforms.WithTimestamps;
+import org.apache.beam.sdk.transforms.windowing.AfterAll;
+import org.apache.beam.sdk.transforms.windowing.AfterPane;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
 import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
+import org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.Sessions;
+import org.apache.beam.sdk.transforms.windowing.TimestampCombiner;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -32,6 +39,7 @@ import org.joda.time.Duration;
 import org.joda.time.Instant;
 
 import java.io.IOException;
+import java.util.Date;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -92,6 +100,7 @@ public class StarterPipeline {
          * Set this required option to specify where to write the output.
          */
         @Description("Path of the file to write to")
+        @Default.String("./output/")
         @Validation.Required
         String getOutput();
 
@@ -158,7 +167,7 @@ public class StarterPipeline {
             if (element.trim().isEmpty()) {
                 emptyLines.inc();
             }
-            System.out.println(c.timestamp());
+            System.out.println(new String(pubsubMessage.getPayload()) + " " + c.timestamp());
             // Split the line into words.
             String[] words = element.split("[^\\p{L}]+", -1);
 
@@ -171,7 +180,7 @@ public class StarterPipeline {
         }
     }
 
-    static class AddTimestampFn extends DoFn<String, String> {
+    static class AddTimestampFn extends DoFn<PubsubMessage, PubsubMessage> {
         private final Instant minTimestamp;
         private final Instant maxTimestamp;
 
@@ -181,7 +190,7 @@ public class StarterPipeline {
         }
 
         @ProcessElement
-        public void processElement(@Element String element, OutputReceiver<String> receiver) {
+        public void processElement(@Element PubsubMessage element, OutputReceiver<PubsubMessage> receiver) {
             Instant randomTimestamp =
                     new Instant(
                             ThreadLocalRandom.current()
@@ -219,6 +228,7 @@ public class StarterPipeline {
     public static class FormatAsTextFn extends SimpleFunction<KV<String, Long>, String> {
         @Override
         public String apply(KV<String, Long> input) {
+            System.out.println(input.getKey() + ": " + input.getValue() + " " + new Date().toString());
             return input.getKey() + ": " + input.getValue();
         }
     }
@@ -238,14 +248,41 @@ public class StarterPipeline {
     }
 
     static void runStarterPipeline(StarterPipelineOptions options) throws IOException {
-        Pipeline p = Pipeline.create(options);
+
 
         final Instant minTimestamp = new Instant(options.getMinTimestampMillis());
         final Instant maxTimestamp = new Instant(options.getMaxTimestampMillis());
+        Pipeline p = Pipeline.create(options);
+        p.apply("ReadPubSubMessage", PubsubIO.readMessages().fromSubscription("projects/project-id/subscriptions/bar"))
+                .apply("ApplyTimestamps", WithTimestamps.of((PubsubMessage pubSub) -> new Instant(System.currentTimeMillis())))
+                .apply("SessionWindowing", Window.<PubsubMessage>into(Sessions.withGapDuration(Duration.standardSeconds(10)))
+                        .triggering(DefaultTrigger.of())
+                        .withAllowedLateness(Duration.standardSeconds(3))
+                        .accumulatingFiredPanes())
 
-        PCollection<PubsubMessage> pipeline = p.apply("ReadLines", PubsubIO.readMessages().fromSubscription("projects/project-id/subscriptions/bar"));
+                /*
+                .apply("SessionWindowing", Window.<PubsubMessage>into(Sessions.withGapDuration(Duration.standardMinutes(1)))
+                .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(3))).orFinally(AfterWatermark.pastEndOfWindow()))
+                .withAllowedLateness(Duration.standardSeconds(3), Window.ClosingBehavior.FIRE_ALWAYS)
+                .accumulatingFiredPanes())
+                */
+                .apply(new CountWords())
+                //.apply("Combine", Combine.<String, Long>perKey(input -> ))
+                //.apply(ParDo.named("FilterComplete").of(Foo.FilterComplete))
+                .apply(MapElements.via(new FormatAsTextFn()));
+        // Bug Apache Beam
+        // https://stackoverflow.com/questions/46983318/writing-via-textio-write-with-sessions-windowing-raises-groupbykey-consumption-e
+        //.apply("WriteCounts", TextIO.write().to(options.getOutput()).withWindowedWrites().withNumShards(1));
+
+        //.apply("Apply timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)))
+
+
+        /*
+        PCollection<PubsubMessage> pipeline = p.apply("ReadLines", PubsubIO.readMessages().fromSubscription("projects/project-id/subscriptions/bar"))
+
+                .apply(ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
         //TextIO assigns the same to each element. Using this PTransfom allow to mock event time. TODO: try WithTimestamps
-        //.apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
+
 
         PCollection<PubsubMessage> windowedPipeline = pipeline
                 .apply("windowing pipeline with sessions window", Window.<PubsubMessage>into(Sessions.withGapDuration(Duration.standardSeconds(10)))
@@ -272,13 +309,18 @@ public class StarterPipeline {
                 .apply("Stringify key value pair", MapElements.via(new FormatAsTextFn()))
                 .apply("creating pubsub message", MapElements.via(new FormatAsPubSubMessage()))
                 .apply("writing one file per window", PubsubIO.writeMessages().to("projects/project-id/topics/sink"));
+        */
 
-        PipelineResult result = p.run();
+        PipelineResult result = null;
         try {
+            result = p.run();
             result.waitUntilFinish();
-        } catch (Exception exc) {
-            result.cancel();
+        } catch (Exception e) {
+            e.printStackTrace();
+            if (null != result)
+                result.cancel();
         }
+
     }
 
     public static void main(String[] args) throws IOException {

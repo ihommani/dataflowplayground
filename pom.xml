@@ -6,7 +6,12 @@
 
     <groupId>com.ihommani</groupId>
     <artifactId>dataflow-playground</artifactId>
+    <packaging>pom</packaging>
     <version>1.0-SNAPSHOT</version>
+    <modules>
+        <module>pub-sub-emulator</module>
+        <module>pipelines</module>
+    </modules>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -14,12 +19,6 @@
 
 
     <dependencies>
-        <dependency>
-            <groupId>com.google.cloud.dataflow</groupId>
-            <artifactId>google-cloud-dataflow-java-sdk-all</artifactId>
-            <version>2.5.0</version>
-        </dependency>
-
         <!-- slf4j API frontend binding with JUL backend -->
         <dependency>
             <groupId>org.slf4j</groupId>

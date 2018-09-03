@@ -1,4 +1,4 @@
-package com.ihommani.dataflow.common;
+package dataflow.common;
 
 import org.apache.beam.sdk.io.FileBasedSink;
 import org.apache.beam.sdk.io.TextIO;
