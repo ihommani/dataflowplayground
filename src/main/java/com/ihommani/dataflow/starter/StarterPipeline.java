@@ -6,39 +6,34 @@ import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubOptions;
-import org.apache.beam.sdk.metrics.Counter;
-import org.apache.beam.sdk.metrics.Distribution;
-import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.options.Default;
-import org.apache.beam.sdk.options.DefaultValueFactory;
 import org.apache.beam.sdk.options.Description;
-import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.options.Validation;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.Filter;
 import org.apache.beam.sdk.transforms.MapElements;
-import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
-import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
-import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.Window;
-import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PDone;
 import org.joda.time.Duration;
-import org.joda.time.Instant;
 
 import java.io.IOException;
-import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * A starter example for writing Beam programs.
  *
- * <p>The example takes two strings, converts them to their upper-case
- * representation and logs them.
+ * <p>The example listen to a PubSub subscription to
+ * <li>
+ * <ul>serialize the payload into a Google BigQuery table</ul>
+ * <ul>Resend a dummy message to the topic of the associated listened subscription</ul>
+ * <ul>If the dummy message is the only message received, send a message to another topic</ul>
+ * </li>
  *
  * <p>To run this starter example locally using DirectRunner, just
  * execute it without any additional parameters from your favorite development
@@ -53,225 +48,70 @@ import java.util.concurrent.ThreadLocalRandom;
 @Slf4j
 public class StarterPipeline {
 
-
-    /**
-     * A {@link DefaultValueFactory} that returns the current system time.
-     */
-    public static class DefaultToCurrentSystemTime implements DefaultValueFactory<Long> {
-        @Override
-        public Long create(PipelineOptions options) {
-            return System.currentTimeMillis();
-        }
-    }
-
-    /**
-     * A {@link DefaultValueFactory} that returns the minimum timestamp plus one hour.
-     */
-    public static class DefaultToMinTimestampPlusOneHour implements DefaultValueFactory<Long> {
-        @Override
-        public Long create(PipelineOptions options) {
-            return options.as(StarterPipelineOptions.class).getMinTimestampMillis()
-                    + Duration.standardHours(1).getMillis();
-        }
-    }
-
-
     public interface StarterPipelineOptions extends PubsubOptions {
 
-        /**
-         * By default, this example reads from a public dataset containing the text of King Lear. Set
-         * this option to choose a different input file or glob.
-         */
-        @Description("Path of the file to read from")
-        @Default.String("gs://apache-beam-samples/shakespeare/kinglear.txt")
-        String getInputFile();
-
-        void setInputFile(String value);
-
-        /**
-         * Set this required option to specify where to write the output.
-         */
-        @Description("Path of the file to write to")
-        @Validation.Required
-        String getOutput();
-
-        void setOutput(String value);
-
-        @Description("Minimum randomly assigned timestamp, in milliseconds-since-epoch")
-        @Default.InstanceFactory(DefaultToCurrentSystemTime.class)
-        Long getMinTimestampMillis();
-
-        void setMinTimestampMillis(Long value);
-
-        @Description("Maximum randomly assigned timestamp, in milliseconds-since-epoch")
-        @Default.InstanceFactory(DefaultToMinTimestampPlusOneHour.class)
-        Long getMaxTimestampMillis();
-
-        void setMaxTimestampMillis(Long value);
-
-        @Description("Duration in minutes of a fixe sized window")
+        @Description("Duration in seconds of a pane in a Global window")
         @Default.Long(5)
         Long getWindowDuration();
 
         void setWindowDuration(Long value);
+
+        //TODO: Add new options: {project-id, input_subscription_name, dataset_name, table_name, somethin else? }
     }
 
-    /**
-     * Concept #2: You can make your pipeline assembly code less verbose by defining your DoFns
-     * statically out-of-line. This DoFn tokenizes lines of text into individual words; we pass it to
-     * a ParDo in the pipeline.
-     */
-    static class ExtractWordsFn extends DoFn<String, String> {
-        private final Counter emptyLines = Metrics.counter(ExtractWordsFn.class, "emptyLines");
-        private final Distribution lineLenDist =
-                Metrics.distribution(ExtractWordsFn.class, "lineLenDistro");
-
-        @ProcessElement
-        public void processElement(@Element String element, OutputReceiver<String> receiver) {
-            lineLenDist.update(element.length());
-            if (element.trim().isEmpty()) {
-                emptyLines.inc();
-            }
-
-            // Split the line into words.
-            String[] words = element.split("[^\\p{L}]+", -1);
-
-            // Output each word encountered into the output PCollection.
-            for (String word : words) {
-                if (!word.isEmpty()) {
-                    receiver.output(word);
-                }
-            }
-        }
-    }
-
-    static class ExtractWordsMessage extends DoFn<PubsubMessage, String> {
-        private final Counter emptyLines = Metrics.counter(ExtractWordsFn.class, "emptyLines");
-        private final Distribution lineLenDist =
-                Metrics.distribution(ExtractWordsFn.class, "lineLenDistro");
-
-        @ProcessElement
-        public void processElement(@Element PubsubMessage pubsubMessage, OutputReceiver<String> receiver, ProcessContext c) {
-            String element = new String(pubsubMessage.getPayload());
-
-            lineLenDist.update(element.length());
-            if (element.trim().isEmpty()) {
-                emptyLines.inc();
-            }
-            System.out.println(c.timestamp());
-            // Split the line into words.
-            String[] words = element.split("[^\\p{L}]+", -1);
-
-            // Output each word encountered into the output PCollection.
-            for (String word : words) {
-                if (!word.isEmpty()) {
-                    receiver.output(word);
-                }
-            }
-        }
-    }
-
-    static class AddTimestampFn extends DoFn<String, String> {
-        private final Instant minTimestamp;
-        private final Instant maxTimestamp;
-
-        AddTimestampFn(Instant minTimestamp, Instant maxTimestamp) {
-            this.minTimestamp = minTimestamp;
-            this.maxTimestamp = maxTimestamp;
-        }
-
-        @ProcessElement
-        public void processElement(@Element String element, OutputReceiver<String> receiver) {
-            Instant randomTimestamp =
-                    new Instant(
-                            ThreadLocalRandom.current()
-                                    .nextLong(minTimestamp.getMillis(), maxTimestamp.getMillis()));
-
-            /*
-             * Concept #2: Set the data element with that timestamp.
-             */
-            receiver.outputWithTimestamp(element, new Instant(randomTimestamp));
-        }
-    }
-
-    /**
-     * A PTransform that converts a PCollection containing lines of text into a PCollection of
-     * formatted word counts.
-     *
-     * <p>Concept #3: This is a custom composite transform that bundles two transforms (ParDo and
-     * Count) as a reusable PTransform subclass. Using composite transforms allows for easy reuse,
-     * modular testing, and an improved monitoring experience.
-     */
-    public static class CountWords
-            extends PTransform<PCollection<PubsubMessage>, PCollection<KV<String, Long>>> {
+    public static class FormatAsPubSubMessage extends SimpleFunction<Long, PubsubMessage> {
         @Override
-        public PCollection<KV<String, Long>> expand(PCollection<PubsubMessage> messages) {
-            PCollection<String> words = messages.apply(ParDo.of(new ExtractWordsMessage()));
-            System.out.println("@@@@@@");
-            // Count the number of times each word occurs.
-            return words.apply(Count.perElement());
+        public PubsubMessage apply(Long message) {
+            return new PubsubMessage(String.valueOf(message).getBytes(), null);
         }
     }
 
-    /**
-     * A SimpleFunction that converts a Word and Count into a printable string.
-     */
-    public static class FormatAsTextFn extends SimpleFunction<KV<String, Long>, String> {
+    public static class CreateDummyPubSubMessage extends SimpleFunction<Long, PubsubMessage> {
         @Override
-        public String apply(KV<String, Long> input) {
-            return input.getKey() + ": " + input.getValue();
+        public PubsubMessage apply(Long message) {
+            return new PubsubMessage("dummy".getBytes(), null);
         }
     }
 
-    public static class FormatAsPubSubMessage extends SimpleFunction<String, PubsubMessage> {
+    public static class CreateBQRow extends SimpleFunction<String, PubsubMessage> {
         @Override
         public PubsubMessage apply(String message) {
-            return new PubsubMessage("@@@@@".getBytes(), null);
-        }
-    }
-
-    public static class SuicidePubSubMessage extends SimpleFunction<PubsubMessage, PubsubMessage> {
-        @Override
-        public PubsubMessage apply(PubsubMessage message) {
-            return new PubsubMessage("killing me sofly".getBytes(), null);
+            return new PubsubMessage(message.getBytes(), null);
         }
     }
 
     static void runStarterPipeline(StarterPipelineOptions options) throws IOException {
         Pipeline p = Pipeline.create(options);
 
-        final Instant minTimestamp = new Instant(options.getMinTimestampMillis());
-        final Instant maxTimestamp = new Instant(options.getMaxTimestampMillis());
-
-        PCollection<PubsubMessage> pipeline = p.apply("ReadLines", PubsubIO.readMessages().fromSubscription("projects/project-id/subscriptions/bar"));
-        //TextIO assigns the same to each element. Using this PTransfom allow to mock event time. TODO: try WithTimestamps
-        //.apply("dummy timestamp", ParDo.of(new AddTimestampFn(minTimestamp, maxTimestamp)));
-
-        PCollection<PubsubMessage> windowedPipeline = pipeline
-                .apply("windowing pipeline with sessions window", Window.<PubsubMessage>into(Sessions.withGapDuration(Duration.standardSeconds(10)))
-                        .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(3))).orFinally(AfterWatermark.pastEndOfWindow()))
-                        .withAllowedLateness(Duration.standardSeconds(3))
+        PCollection<PubsubMessage> pubsubMessagePCollection = p.apply("Read PubSub messages", PubsubIO.readMessages().fromSubscription("projects/project-id/subscriptions/bar"))
+                .apply("windowing pipeline with sessions window", Window.<PubsubMessage>into(new GlobalWindows())
+                        .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(options.getWindowDuration()))))
+                        //.triggering(Repeatedly.forever(AfterPane.elementCountAtLeast(1))) //TODO: combine number of element and ellapsed time since the first pane element;
                         .discardingFiredPanes());
 
-        pipeline
-                .apply("windowing pipeline with session window2", Window.<PubsubMessage>into(Sessions.withGapDuration(Duration.standardSeconds(10)))
-                        .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(3))).orFinally(AfterWatermark.pastEndOfWindow()))
-                        .withAllowedLateness(Duration.standardSeconds(3))
-                        .discardingFiredPanes())
-                .apply(new CountWords())
-                .apply(MapElements.via(new FormatAsTextFn()))
-                .apply(MapElements.via(new FormatAsPubSubMessage()))
-                .apply(MapElements.via(new SuicidePubSubMessage()))
-                .apply(PubsubIO.writeMessages().to("projects/project-id/topics/kill"));
+        PCollection<Long> numberOfMessage = pubsubMessagePCollection
+                .apply("counting pub/sub message", Count.globally());
 
+        PDone killingBranch = numberOfMessage
+                .apply("Filtering when PCollection size equals to one", Filter.equal(1L))
+                .apply("PubSub message creation", MapElements.via(new FormatAsPubSubMessage()))
+                .apply("Publishing on PusbSub kill topic", PubsubIO.writeMessages().to("projects/project-id/topics/export"));
 
-        PCollection<KV<String, Long>> wordCount = windowedPipeline
-                .apply("counting word", new CountWords());
+        PDone hearthBeatBranch = numberOfMessage
+                .apply("Creating Dummy Message", MapElements.via(new CreateDummyPubSubMessage()))
+                .apply("Publishing dummy message to the initial topic", PubsubIO.writeMessages().to("projects/project-id/topics/foo"));
 
-        wordCount
-                .apply("Stringify key value pair", MapElements.via(new FormatAsTextFn()))
-                .apply("creating pubsub message", MapElements.via(new FormatAsPubSubMessage()))
-                .apply("writing one file per window", PubsubIO.writeMessages().to("projects/project-id/topics/sink"));
+        PDone serialisationBranch = pubsubMessagePCollection
+                .apply("PubSub message payload extraction", ParDo.of(new DoFn<PubsubMessage, String>() {
+                    @ProcessElement
+                    public void processElement(@Element PubsubMessage pubsubMessage, OutputReceiver<String> receiver) {
+                        String element = new String(pubsubMessage.getPayload());
+                        receiver.output(element);
+                    }
+                }))
+                .apply("Filtering out dummy messages", Filter.by(input -> !input.matches("dummy.*")))
+                .apply("Creating bigQuery row with the message content", MapElements.via(new CreateBQRow()))
+                .apply("Inserting data to BQ table", PubsubIO.writeMessages().to("projects/project-id/topics/bq_topic"));
 
         PipelineResult result = p.run();
         try {
