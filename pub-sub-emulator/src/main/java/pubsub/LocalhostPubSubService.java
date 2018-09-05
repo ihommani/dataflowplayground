@@ -16,12 +16,14 @@ import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.PushConfig;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import lombok.AllArgsConstructor;
 
-
+@AllArgsConstructor
 public class LocalhostPubSubService {
 
+    private String host;
 
-    public void createTopic(String host, String projectId, String topicName) {
+    public void createTopic(String projectId, String topicName) {
         ManagedChannel channel = null;
         TopicAdminClient topicClient = null;
         try {
@@ -50,7 +52,7 @@ public class LocalhostPubSubService {
         }
     }
 
-    public void createPullSubscription(String host, String topicName, String subscriptionName) {
+    public void createPullSubscription(String topicName, String subscriptionName) {
 
         ManagedChannel channel = null;
         SubscriptionAdminClient subscriptionAdminClient = null;
@@ -83,7 +85,7 @@ public class LocalhostPubSubService {
         }
     }
 
-    public void publish(String host, String projectId, String topicName, int nbMessages) throws Exception {
+    public void publish(String projectId, String topicName, int nbMessages) throws Exception {
 
         Publisher publisher = null;
         ManagedChannel channel = null;

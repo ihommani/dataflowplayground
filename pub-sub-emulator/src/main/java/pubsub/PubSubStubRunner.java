@@ -1,35 +1,36 @@
 package pubsub;
 
-import java.io.IOException;
-
 public class PubSubStubRunner {
+    //private static final String PROJECT_ID = "project-id";
+    //private static final String HOST = "localhost:8085";
+    //private static final LocalhostPubSubService pubSubService = new LocalhostPubSubService(HOST);
+    private static final GCloudPubSubService pubSubService = new GCloudPubSubService();
+    private static final String PROJECT_ID = "dataflow-report-test";
 
-    private static final LocalhostPubSubService pubSubService = new LocalhostPubSubService();
-    private static final String HOST = "localhost:8085";
-    private static final String PROJECT_ID = "project-id";
-    private static final String topic = "my-topic";
-    private static final String TOPIC_SINK = "sink";
-    private static final String TOPIC_KILL = "kill";
-    private static final String subscription = "projects/project-id/subscriptions/bar";
+    private static final String TOPIC = "export_test";
+    private static final String TOPIC_FOO = "foo_test";
+    private static final String TOPIC_BQ = "bq_topic_test";
+    private static final String TOPIC_SUBSCRIPTION = "projects/" + PROJECT_ID + "/topics/foo_test";
+    private static final String SUBSCRIPTION = "projects/" + PROJECT_ID + "/subscriptions/bar_test";
 
 
     public static void main(String[] args) throws Exception {
-        /*
-        pubSubService.createTopic(HOST, PROJECT_ID, topic);
-        pubSubService.createTopic(HOST, PROJECT_ID, TOPIC_SINK);
-        pubSubService.createTopic(HOST, PROJECT_ID, TOPIC_KILL);
-        pubSubService.createPullSubscription(HOST, "projects/project-id/topics/my-topic", subscription);
-        */
+        // For init (only once)
+        //pubSubService.createTopic(PROJECT_ID, TOPIC);
+        //pubSubService.createTopic(PROJECT_ID, TOPIC_FOO);
+        //pubSubService.createTopic(PROJECT_ID, TOPIC_BQ);
+        //pubSubService.createPullSubscription(TOPIC_SUBSCRIPTION, SUBSCRIPTION);
 
-
-        sendMessages();
-        //Thread.sleep(5000);
-        //sendMessages();
+        // Send 5000 messages every 2 sec
+        for(int i=0; i<15; i++) {
+            sendMessages(PROJECT_ID, TOPIC_FOO, 5000);
+            Thread.sleep(2000);
+        }
 
     }
 
-    public static void sendMessages() throws Exception {
-        pubSubService.publish(HOST, PROJECT_ID, topic, 10000);
+    public static void sendMessages(String projectId, String topic, int nbMessages) throws Exception {
+        pubSubService.publish(projectId, topic, nbMessages);
     }
 
 }
