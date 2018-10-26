@@ -22,10 +22,10 @@ public class PubSubStubRunner {
         //pubSubService.createPullSubscription(TOPIC_SUBSCRIPTION, SUBSCRIPTION);
 
         // Send 5000 messages every 2 sec
-        for(int i=0; i<15; i++) {
+        //for(int i=0; i<15; i++) {
             sendMessages(PROJECT_ID, TOPIC_FOO, 5000);
-            Thread.sleep(2000);
-        }
+        //    Thread.sleep(2000);
+        //}
 
     }
 

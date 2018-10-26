@@ -1,5 +1,6 @@
 package dataflow.starter;
 
+import com.google.api.services.bigquery.model.TimePartitioning;
 import dataflow.common.WriteToBigQuery;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.runners.dataflow.DataflowPipelineJob;
@@ -167,6 +168,8 @@ public class StarterPipeline {
         PipelineResult result = p.run();
         log.info("jobId {} running", ((DataflowPipelineJob) result).getJobId());
         result.waitUntilFinish();
+
+        new TimePartitioning();
     }
 
     public static void main(String[] args) throws IOException {

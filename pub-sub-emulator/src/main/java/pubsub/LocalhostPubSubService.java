@@ -121,4 +121,33 @@ public class LocalhostPubSubService {
         }
     }
 
+
+    public void publish(String projectId, String topicName, PubsubMessage pubsubMessage) throws Exception {
+
+        Publisher publisher = null;
+        ManagedChannel channel = null;
+        try {
+            channel = ManagedChannelBuilder.forTarget(host).usePlaintext().build();
+            TransportChannelProvider channelProvider =
+                    FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
+            ProjectTopicName projectTopicName = ProjectTopicName.of(projectId, topicName);
+            publisher = Publisher.newBuilder(projectTopicName)
+                    .setChannelProvider(channelProvider)
+                    .setCredentialsProvider(NoCredentialsProvider.create())
+                    .build();
+
+            // Schedule a message to be published. Messages are automatically batched.
+            publisher.publish(pubsubMessage);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            // When finished with the publisher, shutdown to free up resources.
+            if (publisher != null)
+                publisher.shutdown();
+            if (channel != null)
+                channel.shutdown();
+        }
+    }
+
 }
